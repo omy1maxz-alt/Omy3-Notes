@@ -1,0 +1,8 @@
+{
+  "name": "Remix NexusNotes",
+  "description": "A lightweight, offline-first Android notes app with optional Gemini AI integration, built for mobile development environments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
