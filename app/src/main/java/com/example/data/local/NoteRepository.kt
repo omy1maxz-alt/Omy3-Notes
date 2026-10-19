@@ -1,6 +1,9 @@
 package com.example.data.local
 
 import android.content.Context
+import com.example.data.local.room.AppDatabase
+import com.example.data.local.room.NoteDao
+import com.example.data.local.room.NoteRoomMapper
 import com.example.data.model.Category
 import com.example.data.model.Note
 import com.example.data.model.NoteBlock
@@ -28,6 +31,9 @@ class NoteRepository(
     private val scope: CoroutineScope
 ) {
     private val mutex = Mutex()
+    private val database = AppDatabase.getDatabase(context)
+    val noteDao: NoteDao = database.noteDao()
+
     private val notesDir = File(context.filesDir, "notes").apply { mkdirs() }
     val mediaDir: File = File(context.filesDir, "media").apply { mkdirs() }
     private val notesFile = File(notesDir, "notes.json")
@@ -244,6 +250,26 @@ class NoteRepository(
         }
     }
 
+    suspend fun moveNoteRelative(noteId: String, targetNoteId: String, placeAfter: Boolean) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val current = _notes.value.toMutableList()
+            val fromIndex = current.indexOfFirst { it.id == noteId }
+            val toIndex = current.indexOfFirst { it.id == targetNoteId }
+            if (fromIndex >= 0 && toIndex >= 0 && fromIndex != toIndex) {
+                val item = current.removeAt(fromIndex)
+                val targetCurrentIndex = current.indexOfFirst { it.id == targetNoteId }
+                val newIndex = if (placeAfter) {
+                    (targetCurrentIndex + 1).coerceIn(0, current.size)
+                } else {
+                    targetCurrentIndex.coerceIn(0, current.size)
+                }
+                current.add(newIndex, item)
+                _notes.value = current
+                persistLocked()
+            }
+        }
+    }
+
     suspend fun splitNoteByCharCount(noteId: String, splitCharCount: Int): Pair<Note, Note>? = withContext(Dispatchers.IO) {
         mutex.withLock {
             val current = _notes.value.toMutableList()
@@ -300,10 +326,12 @@ class NoteRepository(
     }
 
     private fun persistLocked() {
+        val currentNotes = _notes.value
+        val currentCategories = _categories.value
         try {
             val payload = NotesDataPayload(
-                notes = _notes.value,
-                categories = _categories.value
+                notes = currentNotes,
+                categories = currentCategories
             )
             val json = adapter.toJson(payload)
 
@@ -325,6 +353,17 @@ class NoteRepository(
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+
+        // Asynchronously persist to Room SQLite database
+        scope.launch(Dispatchers.IO) {
+            try {
+                val entities = currentNotes.mapIndexed { idx, n -> NoteRoomMapper.toEntity(n, idx) }
+                noteDao.deleteAllNotes()
+                noteDao.insertNotes(entities)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 }

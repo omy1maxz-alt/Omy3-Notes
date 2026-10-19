@@ -290,8 +290,46 @@ class MainViewModel(
             if (settings.value.sortOrder != "custom") {
                 settingsRepository.updateSortOrder("custom")
             }
-            noteRepository.moveNote(noteId, delta)
-            showMessage("Note position updated")
+            val visible = filteredNotes.value
+            val currentIndex = visible.indexOfFirst { it.id == noteId }
+            if (currentIndex >= 0) {
+                val targetIndex = (currentIndex + delta).coerceIn(0, visible.lastIndex)
+                if (currentIndex != targetIndex) {
+                    val targetNote = visible[targetIndex]
+                    val placeAfter = delta > 0
+                    noteRepository.moveNoteRelative(noteId, targetNote.id, placeAfter)
+                    showMessage("Note position updated")
+                }
+            } else {
+                noteRepository.moveNote(noteId, delta)
+                showMessage("Note position updated")
+            }
+        }
+    }
+
+    fun moveNoteDirection(noteId: String, deltaX: Int, deltaY: Int, isGridView: Boolean) {
+        val delta = if (isGridView) {
+            when {
+                deltaX != 0 -> deltaX
+                deltaY != 0 -> deltaY * 2
+                else -> 0
+            }
+        } else {
+            when {
+                deltaY != 0 -> deltaY
+                deltaX != 0 -> deltaX
+                else -> 0
+            }
+        }
+        if (delta != 0) {
+            moveNotePosition(noteId, delta)
+        }
+    }
+
+    fun updateNoteTint(note: Note, tint: String) {
+        viewModelScope.launch {
+            noteRepository.saveNote(note.copy(tint = tint))
+            showMessage("Note color updated")
         }
     }
 
@@ -452,6 +490,63 @@ class MainViewModel(
     }
 
     // AI Operations
+    fun generateNoteContent(
+        topicOrPrompt: String,
+        tone: String = "informative and structured",
+        onResult: (String) -> Unit,
+        onError: (String) -> Unit = { showMessage("AI Generation: $it") }
+    ) {
+        viewModelScope.launch {
+            _isAiLoading.value = true
+            val result = aiRepository.generateNoteContent(topicOrPrompt, tone)
+            _isAiLoading.value = false
+            result.onSuccess { onResult(it) }
+                .onFailure { onError(it.localizedMessage ?: "Generation failed") }
+        }
+    }
+
+    fun generateOutline(
+        topic: String,
+        onResult: (String) -> Unit,
+        onError: (String) -> Unit = { showMessage("AI Outline: $it") }
+    ) {
+        viewModelScope.launch {
+            _isAiLoading.value = true
+            val result = aiRepository.generateOutline(topic)
+            _isAiLoading.value = false
+            result.onSuccess { onResult(it) }
+                .onFailure { onError(it.localizedMessage ?: "Outline generation failed") }
+        }
+    }
+
+    fun brainstormIdeas(
+        topic: String,
+        onResult: (String) -> Unit,
+        onError: (String) -> Unit = { showMessage("Brainstorming: $it") }
+    ) {
+        viewModelScope.launch {
+            _isAiLoading.value = true
+            val result = aiRepository.brainstormIdeas(topic)
+            _isAiLoading.value = false
+            result.onSuccess { onResult(it) }
+                .onFailure { onError(it.localizedMessage ?: "Brainstorming failed") }
+        }
+    }
+
+    fun continueWriting(
+        existingText: String,
+        onResult: (String) -> Unit,
+        onError: (String) -> Unit = { showMessage("AI Writing: $it") }
+    ) {
+        viewModelScope.launch {
+            _isAiLoading.value = true
+            val result = aiRepository.continueWriting(existingText)
+            _isAiLoading.value = false
+            result.onSuccess { onResult(it) }
+                .onFailure { onError(it.localizedMessage ?: "Continuation failed") }
+        }
+    }
+
     fun executeAiInstruction(
         instruction: String,
         text: String,
@@ -471,13 +566,21 @@ class MainViewModel(
         }
     }
 
-    fun summarizeNote(text: String, onResult: (String) -> Unit) {
+    fun summarizeNote(
+        text: String,
+        format: String = "standard", // "standard", "bullets", "concise"
+        onResult: (String) -> Unit
+    ) {
         viewModelScope.launch {
             _isAiLoading.value = true
-            val result = aiRepository.summarize(text)
+            val result = when (format) {
+                "bullets" -> aiRepository.summarizeInBullets(text)
+                "concise" -> aiRepository.summarizeConcise(text)
+                else -> aiRepository.summarize(text)
+            }
             _isAiLoading.value = false
             result.onSuccess { onResult(it) }
-                .onFailure { showMessage("AI Summarize: ${it.message}") }
+                .onFailure { showMessage("AI Summarize: ${it.localizedMessage ?: it.message}") }
         }
     }
 

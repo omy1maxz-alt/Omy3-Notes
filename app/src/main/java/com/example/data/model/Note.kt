@@ -29,7 +29,9 @@ data class NoteBlock(
     val imagePath: String? = null,
     val imageAlignment: String = "center", // "left", "center", "right", "full"
     val imageScale: Float = 1.0f,
-    val strokes: List<HandwritingStroke> = emptyList()
+    val strokes: List<HandwritingStroke> = emptyList(),
+    val charOffset: Int = 0,
+    val lineOffset: Int = 0
 )
 
 data class NoteHistoryVersion(

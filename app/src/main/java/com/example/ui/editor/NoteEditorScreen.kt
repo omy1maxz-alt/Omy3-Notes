@@ -20,19 +20,27 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -77,6 +85,7 @@ import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.VerticalAlignBottom
@@ -181,7 +190,6 @@ import com.example.data.model.Category
 import com.example.data.model.HandwritingStroke
 import com.example.data.model.Note
 import com.example.data.model.NoteBlock
-import com.example.ui.components.EmojiDialog
 import com.example.ui.components.HandwritingBlockView
 import com.example.ui.components.NoteTintRow
 import com.example.ui.theme.FocusModeBg
@@ -368,15 +376,13 @@ fun NoteEditorScreen(
     val blocks = remember {
         mutableStateListOf<NoteBlock>().apply {
             if (existingNote != null && existingNote.blocks.isNotEmpty()) {
-                // If any text block is large (>6,000 chars), automatically chunk for 120 FPS LazyColumn virtualization
-                existingNote.blocks.forEach { b ->
-                    if (b.type == BlockType.TEXT && b.content.length > 6000) {
-                        addAll(chunkLargeTextToBlocks(b.content))
-                    } else {
-                        add(b)
-                    }
-                }
+                addAll(existingNote.blocks)
+                // Automatically merge adjacent text blocks so text is unified
+                mergeAdjacentTextBlocks(this)
             } else {
+                add(NoteBlock(type = BlockType.TEXT, content = ""))
+            }
+            if (isEmpty()) {
                 add(NoteBlock(type = BlockType.TEXT, content = ""))
             }
         }
@@ -428,10 +434,52 @@ fun NoteEditorScreen(
         derivedStateOf { title.length + blocks.sumOf { it.content.length } }
     }
 
+    // Keyboard & Clipboard
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val clipboardManager = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
+
     // Selection tracking across blocks
     var activeSelectedText by remember { mutableStateOf("") }
     var activeSelectedBlockIndex by remember { mutableStateOf(-1) }
     var activeSelectionRange by remember { mutableStateOf<TextRange?>(null) }
+    var isFullNoteSelected by remember { mutableStateOf(false) }
+
+    fun selectAllNoteText() {
+        mergeAdjacentTextBlocks(blocks)
+        val textBlockIdx = blocks.indexOfFirst { it.type == BlockType.TEXT }
+        val targetIdx = if (textBlockIdx >= 0) textBlockIdx else 0
+        if (targetIdx in blocks.indices && blocks[targetIdx].type == BlockType.TEXT) {
+            val textLen = blocks[targetIdx].content.length
+            activeSelectedBlockIndex = targetIdx
+            activeSelectionRange = TextRange(0, textLen)
+            activeSelectedText = blocks[targetIdx].content
+        }
+        isFullNoteSelected = true
+
+        val allContent = buildString {
+            if (title.isNotBlank()) {
+                append(title)
+                append("\n\n")
+            }
+            blocks.forEach { b ->
+                when (b.type) {
+                    BlockType.TEXT -> if (b.content.isNotBlank()) appendLine(b.content)
+                    BlockType.CHECKLIST -> appendLine(if (b.checked) "[x] ${b.content}" else "[ ] ${b.content}")
+                    BlockType.BULLET -> appendLine("• ${b.content}")
+                    else -> {}
+                }
+            }
+        }.trim()
+
+        if (allContent.isNotEmpty()) {
+            clipboardManager.setText(AnnotatedString(allContent))
+            haptic?.performHapticFeedback(HapticFeedbackType.LongPress)
+            viewModel.showMessage("All note text selected & copied (${allContent.length} chars) ✓")
+        } else {
+            viewModel.showMessage("Note is empty")
+        }
+    }
 
     // In-note find and replace
     var showFindReplace by remember { mutableStateOf(false) }
@@ -551,17 +599,12 @@ fun NoteEditorScreen(
     var showCategoryMenu by remember { mutableStateOf(false) }
     var showColorDialog by remember { mutableStateOf(false) }
     var showFontDialog by remember { mutableStateOf(false) }
-    var showEmojiDialog by remember { mutableStateOf(false) }
     var showHistoryDialog by remember { mutableStateOf(false) }
     var showImageSourceDialog by remember { mutableStateOf(false) }
     var placeImageTargetIndex by remember { mutableStateOf<Int?>(null) }
     var activeImageSettingsIndex by remember { mutableStateOf<Int?>(null) }
     var showAiResultDialog by remember { mutableStateOf<Pair<String, String>?>(null) } // Title to Result
 
-    // Keyboard & Clipboard
-    val keyboardController = LocalSoftwareKeyboardController.current
-    val clipboardManager = LocalClipboardManager.current
-    val haptic = LocalHapticFeedback.current
     var showAiInstructionBox by remember { mutableStateOf(false) }
     var showAiDisabledDialog by remember { mutableStateOf(false) }
     var showAiResultPreview by remember { mutableStateOf(false) }
@@ -573,7 +616,7 @@ fun NoteEditorScreen(
 
     fun insertImageAtCurrentPosition(imagePath: String, caption: String = "") {
         captureSnapshot(force = true)
-        val newBlock = NoteBlock(type = BlockType.IMAGE, imagePath = imagePath, content = caption)
+        val newBlock = NoteBlock(type = BlockType.IMAGE, imagePath = imagePath, content = caption, imageScale = 0.40f)
         if (activeSelectedBlockIndex in blocks.indices && blocks[activeSelectedBlockIndex].type == BlockType.TEXT) {
             val currentBlock = blocks[activeSelectedBlockIndex]
             val range = activeSelectionRange
@@ -771,6 +814,7 @@ fun NoteEditorScreen(
     val activeFontFamily = if (isFocusMode) FontFamily.Serif else getFontFamily(font)
 
     Scaffold(
+        contentWindowInsets = WindowInsets.safeDrawing,
         containerColor = backgroundColor,
         topBar = {
             if (isFocusMode) {
@@ -974,6 +1018,14 @@ fun NoteEditorScreen(
                             onDismissRequest = { showOverflowMenu = false }
                         ) {
                             DropdownMenuItem(
+                                text = { Text("Select All Note Text") },
+                                leadingIcon = { Icon(Icons.Default.SelectAll, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    selectAllNoteText()
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text(if (showFindReplace) "Hide Find & Replace" else "Find & Replace") },
                                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
                                 onClick = {
@@ -1154,107 +1206,146 @@ fun NoteEditorScreen(
         },
         bottomBar = {
             if (!isFocusMode && !isFormattedView) {
-                // Floating Bottom Formatting Toolbar
-                Surface(
-                    shape = RoundedCornerShape(24.dp),
-                    color = Color.White.copy(alpha = 0.95f),
-                    shadowElevation = 8.dp,
+                // Floating Bottom Formatting Toolbar respecting system navigation bar & keyboard insets
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .navigationBarsPadding()
                         .imePadding()
+                        .padding(horizontal = 12.dp)
+                        .padding(bottom = 8.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceAround,
-                        verticalAlignment = Alignment.CenterVertically
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        color = Color.White.copy(alpha = 0.95f),
+                        shadowElevation = 8.dp,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        // Aa text formatting
-                        IconButton(onClick = { showFontDialog = true }) {
-                            Text("Aa", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color.Black)
-                        }
-
-                        // Checklist block
-                        IconButton(onClick = {
-                            captureSnapshot()
-                            blocks.add(NoteBlock(type = BlockType.CHECKLIST, content = ""))
-                        }) {
-                            Icon(Icons.Default.CheckBox, contentDescription = "Checklist", tint = Color.DarkGray)
-                        }
-
-                        // Dictation Microphone
-                        IconButton(onClick = {
-                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                                startSpeechRecognition(context, onResult = { spokenText ->
-                                    captureSnapshot()
-                                    val lastTextBlock = blocks.indexOfLast { it.type == BlockType.TEXT }
-                                    if (lastTextBlock >= 0) {
-                                        val current = blocks[lastTextBlock].content
-                                        blocks[lastTextBlock] = blocks[lastTextBlock].copy(
-                                            content = if (current.isBlank()) spokenText else "$current $spokenText"
-                                        )
-                                    } else {
-                                        blocks.add(NoteBlock(type = BlockType.TEXT, content = spokenText))
-                                    }
-                                }, onStatusChange = { isDictating = it })
-                            } else {
-                                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        }) {
-                            Icon(
-                                Icons.Default.Mic,
-                                contentDescription = "Dictate note",
-                                tint = if (isDictating) Color.Red else Color.DarkGray
-                            )
-                        }
-
-                        // Pen (Handwriting stroke block)
-                        IconButton(onClick = {
-                            captureSnapshot()
-                            blocks.add(NoteBlock(type = BlockType.HANDWRITING))
-                        }) {
-                            Icon(Icons.Default.Edit, contentDescription = "Handwriting", tint = Color.DarkGray)
-                        }
-
-                        // Image Source Picker (Sample Gallery or Device Picker)
-                        IconButton(onClick = { showImageSourceDialog = true }) {
-                            Icon(Icons.Default.Image, contentDescription = "Insert Image", tint = Color.DarkGray)
-                        }
-
-                        // Expressive AI Assistant Button (NOT an emoji button!)
-                        IconButton(
-                            onClick = {
-                                if (!settings.geminiEnabled || settings.geminiApiKey.isBlank()) {
-                                    showAiDisabledDialog = true
-                                } else {
-                                    aiTargetIsSelection = activeSelectedText.isNotBlank()
-                                    aiErrorMessage = null
-                                    showAiInstructionBox = true
-                                }
-                            },
-                            modifier = Modifier.testTag("ai_assistant_toolbar_button")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            ExpressiveAiIcon(size = 30.dp)
-                        }
+                            // Aa text formatting
+                            IconButton(
+                                onClick = { showFontDialog = true },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Text("Aa", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color.Black)
+                            }
 
-                        // Emoji dialog
-                        IconButton(onClick = { showEmojiDialog = true }) {
-                            Icon(Icons.Default.Mood, contentDescription = "Insert Emoji", tint = Color.DarkGray)
-                        }
+                            // Select All Note Text
+                            IconButton(
+                                onClick = { selectAllNoteText() },
+                                modifier = Modifier.size(40.dp).testTag("select_all_toolbar_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SelectAll,
+                                    contentDescription = "Select All Note Text",
+                                    tint = if (isFullNoteSelected) MaterialTheme.colorScheme.primary else Color.DarkGray,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
 
-                        // Background color
-                        IconButton(onClick = { showColorDialog = true }) {
-                            Icon(Icons.Default.ColorLens, contentDescription = "Note Color", tint = Color.DarkGray)
-                        }
+                            // Checklist block
+                            IconButton(
+                                onClick = {
+                                    captureSnapshot()
+                                    blocks.add(NoteBlock(type = BlockType.CHECKLIST, content = ""))
+                                },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(Icons.Default.CheckBox, contentDescription = "Checklist", tint = Color.DarkGray, modifier = Modifier.size(22.dp))
+                            }
 
-                        // Bullet list
-                        IconButton(onClick = {
-                            captureSnapshot()
-                            blocks.add(NoteBlock(type = BlockType.BULLET, content = ""))
-                        }) {
-                            Icon(Icons.Default.FormatListBulleted, contentDescription = "Bullet List", tint = Color.DarkGray)
+                            // Dictation Microphone
+                            IconButton(
+                                onClick = {
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                        startSpeechRecognition(context, onResult = { spokenText ->
+                                            captureSnapshot()
+                                            val lastTextBlock = blocks.indexOfLast { it.type == BlockType.TEXT }
+                                            if (lastTextBlock >= 0) {
+                                                val current = blocks[lastTextBlock].content
+                                                blocks[lastTextBlock] = blocks[lastTextBlock].copy(
+                                                    content = if (current.isBlank()) spokenText else "$current $spokenText"
+                                                )
+                                            } else {
+                                                blocks.add(NoteBlock(type = BlockType.TEXT, content = spokenText))
+                                            }
+                                        }, onStatusChange = { isDictating = it })
+                                    } else {
+                                        audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Mic,
+                                    contentDescription = "Dictate note",
+                                    tint = if (isDictating) Color.Red else Color.DarkGray,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+
+                            // Pen (Handwriting stroke block)
+                            IconButton(
+                                onClick = {
+                                    captureSnapshot()
+                                    blocks.add(NoteBlock(type = BlockType.HANDWRITING))
+                                },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(Icons.Default.Edit, contentDescription = "Handwriting", tint = Color.DarkGray, modifier = Modifier.size(22.dp))
+                            }
+
+                            // Image Source Picker (Sample Gallery or Device Picker)
+                            IconButton(
+                                onClick = { showImageSourceDialog = true },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(Icons.Default.Image, contentDescription = "Insert Image", tint = Color.DarkGray, modifier = Modifier.size(22.dp))
+                            }
+
+                            // Expressive AI Assistant Button (NOT an emoji button!)
+                            IconButton(
+                                onClick = {
+                                    if (!settings.geminiEnabled || settings.geminiApiKey.isBlank()) {
+                                        showAiDisabledDialog = true
+                                    } else {
+                                        aiTargetIsSelection = activeSelectedText.isNotBlank()
+                                        aiErrorMessage = null
+                                        showAiInstructionBox = true
+                                    }
+                                },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .testTag("ai_assistant_toolbar_button")
+                            ) {
+                                ExpressiveAiIcon(size = 28.dp)
+                            }
+
+                            // Background color / Theme button (never squished!)
+                            IconButton(
+                                onClick = { showColorDialog = true },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(Icons.Default.ColorLens, contentDescription = "Note Color", tint = Color.DarkGray, modifier = Modifier.size(22.dp))
+                            }
+
+                            // Bullet list
+                            IconButton(
+                                onClick = {
+                                    captureSnapshot()
+                                    blocks.add(NoteBlock(type = BlockType.BULLET, content = ""))
+                                },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(Icons.Default.FormatListBulleted, contentDescription = "Bullet List", tint = Color.DarkGray, modifier = Modifier.size(22.dp))
+                            }
                         }
                     }
                 }
@@ -1284,6 +1375,126 @@ fun NoteEditorScreen(
                     .padding(innerPadding)
                     .padding(horizontal = 16.dp)
             ) {
+            // Full Note Selection Action Bar
+            AnimatedVisibility(visible = isFullNoteSelected) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    tonalElevation = 6.dp,
+                    shadowElevation = 6.dp,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp)
+                        .testTag("full_note_selection_bar")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SelectAll,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "All text marked (${totalCharCount} chars)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Copy button
+                            IconButton(
+                                onClick = {
+                                    val textToCopy = buildString {
+                                        if (title.isNotBlank()) append(title).append("\n\n")
+                                        blocks.forEach { b ->
+                                            when (b.type) {
+                                                BlockType.TEXT -> if (b.content.isNotBlank()) appendLine(b.content)
+                                                BlockType.CHECKLIST -> appendLine(if (b.checked) "[x] ${b.content}" else "[ ] ${b.content}")
+                                                BlockType.BULLET -> appendLine("• ${b.content}")
+                                                else -> {}
+                                            }
+                                        }
+                                    }.trim()
+                                    clipboardManager.setText(AnnotatedString(textToCopy))
+                                    viewModel.showMessage("Copied all text to clipboard ✓")
+                                },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Copy all",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+
+                            // Share button
+                            IconButton(
+                                onClick = {
+                                    val textToShare = buildString {
+                                        if (title.isNotBlank()) append(title).append("\n\n")
+                                        blocks.forEach { b ->
+                                            when (b.type) {
+                                                BlockType.TEXT -> if (b.content.isNotBlank()) appendLine(b.content)
+                                                BlockType.CHECKLIST -> appendLine(if (b.checked) "[x] ${b.content}" else "[ ] ${b.content}")
+                                                BlockType.BULLET -> appendLine("• ${b.content}")
+                                                else -> {}
+                                            }
+                                        }
+                                    }.trim()
+                                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, textToShare)
+                                        if (title.isNotBlank()) putExtra(Intent.EXTRA_SUBJECT, title)
+                                    }
+                                    context.startActivity(Intent.createChooser(sendIntent, "Share Note"))
+                                },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Share,
+                                    contentDescription = "Share",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+
+                            // Dismiss selection
+                            IconButton(
+                                onClick = {
+                                    isFullNoteSelected = false
+                                    activeSelectionRange = null
+                                },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Deselect",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Find and Replace Banner
             AnimatedVisibility(visible = showFindReplace) {
                 Surface(
@@ -1613,503 +1824,436 @@ fun NoteEditorScreen(
                 }
             }
 
-            // Rich Blocks List
+            // Rich Blocks List with Text Reflow & Movable Images
+            val renderGroups = remember(blocks.toList()) {
+                groupBlocksForEditor(blocks)
+            }
+
             LazyColumn(
                 state = lazyListState,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(top = 4.dp),
+                contentPadding = PaddingValues(bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                itemsIndexed(blocks, key = { _, block -> block.id }) { index, block ->
-                    when (block.type) {
-                        BlockType.TEXT -> {
-                            var tfv by remember(block.id) {
-                                mutableStateOf(TextFieldValue(block.content))
-                            }
-                            if (tfv.text != block.content) {
-                                tfv = tfv.copy(text = block.content)
-                            }
+                items(renderGroups, key = { group ->
+                    when (group) {
+                        is EditorRenderGroup.Single -> "single_${group.block.id}"
+                        is EditorRenderGroup.TextWithFloatedImage -> "side_${group.textBlock.id}_${group.imageBlock.id}"
+                        is EditorRenderGroup.TextSurroundingImage -> "surround_${group.leftTextBlock.id}_${group.imageBlock.id}_${group.rightTextBlock.id}"
+                        is EditorRenderGroup.ImageCluster -> "cluster_${group.items.joinToString("_") { it.second.id }}"
+                    }
+                }) { group ->
+                    when (group) {
+                        is EditorRenderGroup.TextSurroundingImage -> {
+                            val imgFraction = (group.imageBlock.imageScale * 0.55f).coerceIn(0.20f, 0.55f)
+                            val remainingFraction = (1.0f - imgFraction).coerceAtLeast(0.40f)
+                            val leftFraction = remainingFraction * 0.5f
+                            val rightFraction = remainingFraction * 0.5f
 
-                            LaunchedEffect(activeSelectedBlockIndex, activeSelectionRange) {
-                                if (activeSelectedBlockIndex == index && activeSelectionRange != null) {
-                                    val sel = activeSelectionRange!!
-                                    if (sel.max <= tfv.text.length && tfv.selection != sel) {
-                                        tfv = tfv.copy(selection = sel)
-                                    }
-                                }
-                            }
-
-                            TextField(
-                                value = tfv,
-                                onValueChange = { newTfv ->
-                                    tfv = newTfv
-                                    if (newTfv.text != block.content) {
-                                        // If large paste (>6,000 chars), automatically chunk into virtualized blocks
-                                        if (newTfv.text.length > 6000 && newTfv.text.length - block.content.length > 200) {
-                                            val chunks = chunkLargeTextToBlocks(newTfv.text)
-                                            captureSnapshot(force = true)
-                                            blocks.removeAt(index)
-                                            blocks.addAll(index, chunks)
-                                        } else {
-                                            blocks[index] = block.copy(content = newTfv.text)
-                                            captureSnapshot(force = false)
-                                        }
-                                    }
-                                    if (!newTfv.selection.collapsed) {
-                                        val minPos = newTfv.selection.min.coerceIn(0, newTfv.text.length)
-                                        val maxPos = newTfv.selection.max.coerceIn(0, newTfv.text.length)
-                                        if (minPos < maxPos) {
-                                            activeSelectedText = newTfv.text.substring(minPos, maxPos)
-                                            activeSelectedBlockIndex = index
-                                            activeSelectionRange = TextRange(minPos, maxPos)
-                                        }
-                                    } else {
-                                        if (activeSelectedBlockIndex == index) {
-                                            activeSelectedText = ""
-                                            activeSelectionRange = null
-                                        }
-                                    }
-                                },
-                                placeholder = {
-                                    if (index == 0) {
-                                        Text(
-                                            text = "Note here",
-                                            fontSize = 16.sp,
-                                            fontFamily = activeFontFamily,
-                                            color = textColor.copy(alpha = 0.4f)
-                                        )
-                                    }
-                                },
-                                textStyle = TextStyle(
-                                    fontSize = 16.sp,
-                                    fontFamily = activeFontFamily,
-                                    color = textColor,
-                                    lineHeight = 24.sp
-                                ),
-                                colors = TextFieldDefaults.colors(
-                                    focusedContainerColor = Color.Transparent,
-                                    unfocusedContainerColor = Color.Transparent,
-                                    focusedIndicatorColor = Color.Transparent,
-                                    unfocusedIndicatorColor = Color.Transparent
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-
-                        BlockType.CHECKLIST -> {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                IconButton(
-                                    onClick = {
-                                        captureSnapshot()
-                                        blocks[index] = block.copy(checked = !block.checked)
-                                    },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = if (block.checked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
-                                        contentDescription = "Check",
-                                        tint = if (block.checked) MaterialTheme.colorScheme.primary else Color.Gray
-                                    )
-                                }
-
-                                TextField(
-                                    value = block.content,
-                                    onValueChange = {
-                                        blocks[index] = block.copy(content = it)
-                                        captureSnapshot()
-                                    },
-                                    placeholder = { Text("To-do item", color = textColor.copy(alpha = 0.4f)) },
-                                    textStyle = TextStyle(
-                                        fontSize = 15.sp,
-                                        fontFamily = activeFontFamily,
-                                        color = if (block.checked) Color.Gray else textColor,
-                                        textDecoration = if (block.checked) TextDecoration.LineThrough else TextDecoration.None
-                                    ),
-                                    colors = TextFieldDefaults.colors(
-                                        focusedContainerColor = Color.Transparent,
-                                        unfocusedContainerColor = Color.Transparent,
-                                        focusedIndicatorColor = Color.Transparent,
-                                        unfocusedIndicatorColor = Color.Transparent
-                                    ),
-                                    modifier = Modifier.weight(1f)
-                                )
-
-                                IconButton(
-                                    onClick = {
-                                        captureSnapshot()
-                                        blocks.removeAt(index)
-                                    },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(Icons.Default.Close, contentDescription = "Delete item", tint = Color.Gray, modifier = Modifier.size(16.dp))
-                                }
-                            }
-                        }
-
-                        BlockType.BULLET -> {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "•",
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isFocusMode) Color.White else MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(start = 8.dp, end = 4.dp)
-                                )
-
-                                TextField(
-                                    value = block.content,
-                                    onValueChange = {
-                                        blocks[index] = block.copy(content = it)
-                                        captureSnapshot()
-                                    },
-                                    placeholder = { Text("Bullet item", color = textColor.copy(alpha = 0.4f)) },
-                                    textStyle = TextStyle(
-                                        fontSize = 15.sp,
-                                        fontFamily = activeFontFamily,
-                                        color = textColor
-                                    ),
-                                    colors = TextFieldDefaults.colors(
-                                        focusedContainerColor = Color.Transparent,
-                                        unfocusedContainerColor = Color.Transparent,
-                                        focusedIndicatorColor = Color.Transparent,
-                                        unfocusedIndicatorColor = Color.Transparent
-                                    ),
-                                    modifier = Modifier.weight(1f)
-                                )
-
-                                IconButton(
-                                    onClick = {
-                                        captureSnapshot()
-                                        blocks.removeAt(index)
-                                    },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(Icons.Default.Close, contentDescription = "Delete item", tint = Color.Gray, modifier = Modifier.size(16.dp))
-                                }
-                            }
-                        }
-
-                        BlockType.IMAGE -> {
-                            val imgFile = block.imagePath?.let { File(context.filesDir, it) }
-                            val bitmap = remember(block.imagePath) {
-                                if (imgFile != null) BitmapLoader.loadScaledBitmap(imgFile, 800, 600) else null
-                            }
-                            var resizeScale by remember(block.id, block.imageScale) { mutableFloatStateOf(block.imageScale) }
-                            var dragOffsetY by remember(block.id) { mutableFloatStateOf(0f) }
-                            var isDraggingImage by remember(block.id) { mutableStateOf(false) }
-
-                            val alignment = when (block.imageAlignment) {
-                                "left" -> Alignment.Start
-                                "right" -> Alignment.End
-                                else -> Alignment.CenterHorizontally
-                            }
-
-                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(vertical = 4.dp),
-                                horizontalAlignment = alignment
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.Top
                             ) {
-                                // Real-time Visual Placement Indicator during Hold-to-Drag
-                                if (isDraggingImage) {
-                                    Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier
-                                            .fillMaxWidth(resizeScale.coerceIn(0.2f, 1.0f))
-                                            .padding(bottom = 6.dp)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.SwapVert,
-                                                contentDescription = null,
-                                                tint = Color.White,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(
-                                                text = if (dragOffsetY > 0) "📍 Moving image down between paragraphs..." else if (dragOffsetY < 0) "📍 Moving image up between paragraphs..." else "📍 Hold & drag vertically to move",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color.White
-                                            )
+                                // Left text column (water filling available left space)
+                                Box(modifier = Modifier.weight(leftFraction)) {
+                                    EditorTextBlockItem(
+                                        block = group.leftTextBlock,
+                                        index = group.leftTextIndex,
+                                        blocks = blocks,
+                                        activeFontFamily = activeFontFamily,
+                                        textColor = textColor,
+                                        captureSnapshot = { captureSnapshot(it) },
+                                        onDirty = { isDirty = true },
+                                        chunkLargeTextToBlocks = ::chunkLargeTextToBlocks,
+                                        activeSelectedBlockIndex = activeSelectedBlockIndex,
+                                        activeSelectionRange = activeSelectionRange,
+                                        onSelectionChanged = { selText, idx, range ->
+                                            activeSelectedText = selText
+                                            activeSelectedBlockIndex = idx
+                                            activeSelectionRange = range
                                         }
-                                    }
+                                    )
                                 }
 
-                                // Clean Image Container: Hold to Drag to Move + 2-Finger Pinch to Resize + 1-finger non-blocking scroll!
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth(resizeScale.coerceIn(0.2f, 1.0f))
-                                        .graphicsLayer {
-                                            if (isDraggingImage) {
-                                                translationY = dragOffsetY.coerceIn(-100f, 100f)
-                                                shadowElevation = 16f
-                                                scaleX = 1.03f
-                                                scaleY = 1.03f
-                                                alpha = 0.88f
-                                            }
-                                        }
-                                        .clip(RoundedCornerShape(10.dp))
-                                        // 2-Finger Pinch-to-Resize
-                                        .pointerInput(block.id) {
-                                            awaitEachGesture {
-                                                do {
-                                                    val event = awaitPointerEvent()
-                                                    if (event.changes.size >= 2) {
-                                                        val p1 = event.changes[0]
-                                                        val p2 = event.changes[1]
-                                                        val prevDist = (p1.previousPosition - p2.previousPosition).getDistance()
-                                                        val currDist = (p1.position - p2.position).getDistance()
-                                                        if (prevDist > 0f && currDist > 0f) {
-                                                            val zoom = currDist / prevDist
-                                                            if (kotlin.math.abs(zoom - 1f) > 0.002f) {
-                                                                p1.consume()
-                                                                p2.consume()
-                                                                val newScale = (resizeScale * zoom).coerceIn(0.2f, 1.0f)
-                                                                if (kotlin.math.abs(newScale - resizeScale) > 0.002f) {
-                                                                    resizeScale = newScale
-                                                                    blocks[index] = block.copy(imageScale = newScale)
-                                                                    isDirty = true
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                } while (event.changes.any { it.pressed })
-                                            }
-                                        }
-                                        // Hold to Drag to Move vertically between text paragraphs!
-                                        .pointerInput(block.id, blocks.size, index) {
-                                            detectDragGesturesAfterLongPress(
-                                                onDragStart = {
-                                                    isDraggingImage = true
-                                                    dragOffsetY = 0f
-                                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                },
-                                                onDrag = { change, dragAmount ->
-                                                    change.consume()
-                                                    dragOffsetY += dragAmount.y
-                                                    if (dragOffsetY > 60f && index < blocks.lastIndex) {
-                                                        captureSnapshot()
-                                                        val item = blocks.removeAt(index)
-                                                        blocks.add(index + 1, item)
-                                                        dragOffsetY = 0f
-                                                        isDirty = true
-                                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                    } else if (dragOffsetY < -60f && index > 0) {
-                                                        captureSnapshot()
-                                                        val item = blocks.removeAt(index)
-                                                        blocks.add(index - 1, item)
-                                                        dragOffsetY = 0f
-                                                        isDirty = true
-                                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                    }
-                                                },
-                                                onDragEnd = {
-                                                    isDraggingImage = false
-                                                    dragOffsetY = 0f
-                                                },
-                                                onDragCancel = {
-                                                    isDraggingImage = false
-                                                    dragOffsetY = 0f
-                                                }
-                                            )
-                                        }
-                                ) {
-                                    if (bitmap != null) {
-                                        Image(
-                                            bitmap = bitmap.asImageBitmap(),
-                                            contentDescription = "Note image (Pinch with two fingers to resize)",
-                                            contentScale = ContentScale.FillWidth,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clip(RoundedCornerShape(10.dp))
-                                        )
-                                    } else {
-                                        Surface(
-                                            shape = RoundedCornerShape(10.dp),
-                                            color = Color.Black.copy(alpha = 0.05f),
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(140.dp)
-                                        ) {
-                                            Box(contentAlignment = Alignment.Center) {
-                                                Text("🖼️ [Image file]", color = Color.Gray, fontSize = 13.sp)
-                                            }
-                                        }
-                                    }
-
-                                    // Top-left compact Move / Reorder Badges
-                                    Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = Color.Black.copy(alpha = 0.65f),
-                                        modifier = Modifier
-                                            .align(Alignment.TopStart)
-                                            .padding(6.dp)
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                                        ) {
-                                            if (index > 0) {
-                                                IconButton(
-                                                    onClick = {
-                                                        captureSnapshot()
-                                                        val item = blocks.removeAt(index)
-                                                        blocks.add(index - 1, item)
-                                                    },
-                                                    modifier = Modifier.size(28.dp)
-                                                ) {
-                                                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Move Up", tint = Color.White, modifier = Modifier.size(18.dp))
-                                                }
-                                            }
-                                            if (index < blocks.lastIndex) {
-                                                IconButton(
-                                                    onClick = {
-                                                        captureSnapshot()
-                                                        val item = blocks.removeAt(index)
-                                                        blocks.add(index + 1, item)
-                                                    },
-                                                    modifier = Modifier.size(28.dp)
-                                                ) {
-                                                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Move Down", tint = Color.White, modifier = Modifier.size(18.dp))
-                                                }
-                                            }
-                                            IconButton(
-                                                onClick = { placeImageTargetIndex = index },
-                                                modifier = Modifier.size(28.dp)
-                                            ) {
-                                                Icon(Icons.Default.Place, contentDescription = "Place Between Paragraphs", tint = Color(0xFFFFD54F), modifier = Modifier.size(16.dp))
-                                            }
-                                        }
-                                    }
-
-                                    // Top-right Discreet Delete Button
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.TopEnd)
-                                            .padding(6.dp)
-                                            .size(32.dp)
-                                            .clip(CircleShape)
-                                            .background(Color.Black.copy(alpha = 0.65f))
-                                            .clickable {
-                                                captureSnapshot()
-                                                blocks.removeAt(index)
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Close,
-                                            contentDescription = "Delete image",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-
-                                    // Bottom-right Resize & Preset Button (Pinch hint & tap for quick size / alignment dialog)
-                                    Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = Color.Black.copy(alpha = 0.72f),
-                                        modifier = Modifier
-                                            .align(Alignment.BottomEnd)
-                                            .padding(6.dp)
-                                            .clip(RoundedCornerShape(14.dp))
-                                            .clickable { activeImageSettingsIndex = index }
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            Text(
-                                                text = "${(resizeScale * 100).toInt()}% 🤏",
-                                                color = Color.White,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            Icon(
-                                                imageVector = Icons.Default.OpenInFull,
-                                                contentDescription = "Resize or adjust image",
-                                                tint = Color.White,
-                                                modifier = Modifier.size(13.dp)
-                                            )
-                                        }
-                                    }
+                                // Center movable image object (boat in water)
+                                Box(modifier = Modifier.weight(imgFraction)) {
+                                    MovableImageItem(
+                                        block = group.imageBlock,
+                                        index = group.imageIndex,
+                                        blocks = blocks,
+                                        context = context,
+                                        haptic = haptic,
+                                        captureSnapshot = { captureSnapshot(it) },
+                                        onDirty = { isDirty = true },
+                                        onDelete = {
+                                            captureSnapshot(force = true)
+                                            blocks.removeAt(group.imageIndex)
+                                        },
+                                        onOpenSettings = { activeImageSettingsIndex = group.imageIndex }
+                                    )
                                 }
 
-                                // Subtle borderless caption line under the picture
-                                if (block.content.isNotBlank() || !isFormattedView) {
-                                    BasicTextField(
-                                        value = block.content,
-                                        onValueChange = { newCaption ->
-                                            blocks[index] = block.copy(content = newCaption)
-                                            captureSnapshot(force = false)
-                                        },
-                                        textStyle = TextStyle(
-                                            fontSize = 12.sp,
-                                            fontFamily = activeFontFamily,
-                                            fontStyle = FontStyle.Italic,
-                                            color = textColor.copy(alpha = 0.65f),
-                                            textAlign = TextAlign.Center
-                                        ),
-                                        decorationBox = { innerTextField ->
-                                            Box(
-                                                modifier = Modifier
-                                                    .fillMaxWidth(resizeScale.coerceIn(0.2f, 1.0f))
-                                                    .padding(top = 4.dp),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                if (block.content.isBlank()) {
-                                                    Text(
-                                                        text = "Add caption...",
-                                                        fontSize = 12.sp,
-                                                        fontStyle = FontStyle.Italic,
-                                                        color = textColor.copy(alpha = 0.35f),
-                                                        textAlign = TextAlign.Center
-                                                    )
-                                                }
-                                                innerTextField()
-                                            }
-                                        },
-                                        modifier = Modifier
-                                            .fillMaxWidth(resizeScale.coerceIn(0.2f, 1.0f))
-                                            .padding(horizontal = 4.dp)
+                                // Right text column (water filling available right space)
+                                Box(modifier = Modifier.weight(rightFraction)) {
+                                    EditorTextBlockItem(
+                                        block = group.rightTextBlock,
+                                        index = group.rightTextIndex,
+                                        blocks = blocks,
+                                        activeFontFamily = activeFontFamily,
+                                        textColor = textColor,
+                                        captureSnapshot = { captureSnapshot(it) },
+                                        onDirty = { isDirty = true },
+                                        chunkLargeTextToBlocks = ::chunkLargeTextToBlocks,
+                                        activeSelectedBlockIndex = activeSelectedBlockIndex,
+                                        activeSelectionRange = activeSelectionRange,
+                                        onSelectionChanged = { selText, idx, range ->
+                                            activeSelectedText = selText
+                                            activeSelectedBlockIndex = idx
+                                            activeSelectionRange = range
+                                        }
                                     )
                                 }
                             }
                         }
 
-                        BlockType.HANDWRITING -> {
-                            Box(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                                HandwritingBlockView(
-                                    strokes = block.strokes,
-                                    onStrokesChanged = { updatedStrokes ->
-                                        blocks[index] = block.copy(strokes = updatedStrokes)
-                                        isDirty = true
-                                    }
-                                )
-                                IconButton(
-                                    onClick = {
-                                        captureSnapshot()
-                                        blocks.removeAt(index)
+                        is EditorRenderGroup.TextWithFloatedImage -> {
+                            val imgFraction = group.imageBlock.imageScale.coerceIn(0.20f, 0.75f)
+                            val textFraction = (1.0f - imgFraction).coerceIn(0.25f, 0.80f)
+                            val charOffset = group.imageBlock.charOffset
+                            val isCenter = group.imageBlock.imageAlignment == "center" || charOffset > 0 || (group.imageBlock.imageAlignment != "left" && group.imageBlock.imageAlignment != "right" && imgFraction <= 0.60f)
+
+                            if (isCenter) {
+                                MovableImageTextFlow(
+                                    text = group.textBlock.content,
+                                    imageBlock = group.imageBlock,
+                                    imageIndex = group.imageIndex,
+                                    blocks = blocks,
+                                    context = context,
+                                    textColor = textColor,
+                                    activeFontFamily = activeFontFamily,
+                                    haptic = haptic,
+                                    captureSnapshot = { captureSnapshot(it) },
+                                    onDirty = { isDirty = true },
+                                    onDelete = {
+                                        captureSnapshot(force = true)
+                                        blocks.removeAt(group.imageIndex)
                                     },
+                                    onOpenSettings = { activeImageSettingsIndex = group.imageIndex }
+                                )
+                            } else if (group.imageOnLeft) {
+                                Row(
                                     modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(6.dp)
-                                        .size(28.dp)
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.Top
                                 ) {
-                                    Icon(Icons.Default.Close, contentDescription = "Remove canvas", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                                    Box(modifier = Modifier.weight(imgFraction)) {
+                                        MovableImageItem(
+                                            block = group.imageBlock,
+                                            index = group.imageIndex,
+                                            blocks = blocks,
+                                            context = context,
+                                            haptic = haptic,
+                                            captureSnapshot = { captureSnapshot(it) },
+                                            onDirty = { isDirty = true },
+                                            onDelete = {
+                                                captureSnapshot(force = true)
+                                                blocks.removeAt(group.imageIndex)
+                                            },
+                                            onOpenSettings = { activeImageSettingsIndex = group.imageIndex }
+                                        )
+                                    }
+                                    Box(modifier = Modifier.weight(textFraction)) {
+                                        EditorTextBlockItem(
+                                            block = group.textBlock,
+                                            index = group.textIndex,
+                                            blocks = blocks,
+                                            activeFontFamily = activeFontFamily,
+                                            textColor = textColor,
+                                            captureSnapshot = { captureSnapshot(it) },
+                                            onDirty = { isDirty = true },
+                                            chunkLargeTextToBlocks = ::chunkLargeTextToBlocks,
+                                            activeSelectedBlockIndex = activeSelectedBlockIndex,
+                                            activeSelectionRange = activeSelectionRange,
+                                            onSelectionChanged = { selText, idx, range ->
+                                                activeSelectedText = selText
+                                                activeSelectedBlockIndex = idx
+                                                activeSelectionRange = range
+                                            }
+                                        )
+                                    }
+                                }
+                            } else {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    Box(modifier = Modifier.weight(textFraction)) {
+                                        EditorTextBlockItem(
+                                            block = group.textBlock,
+                                            index = group.textIndex,
+                                            blocks = blocks,
+                                            activeFontFamily = activeFontFamily,
+                                            textColor = textColor,
+                                            captureSnapshot = { captureSnapshot(it) },
+                                            onDirty = { isDirty = true },
+                                            chunkLargeTextToBlocks = ::chunkLargeTextToBlocks,
+                                            activeSelectedBlockIndex = activeSelectedBlockIndex,
+                                            activeSelectionRange = activeSelectionRange,
+                                            onSelectionChanged = { selText, idx, range ->
+                                                activeSelectedText = selText
+                                                activeSelectedBlockIndex = idx
+                                                activeSelectionRange = range
+                                            }
+                                        )
+                                    }
+                                    Box(modifier = Modifier.weight(imgFraction)) {
+                                        MovableImageItem(
+                                            block = group.imageBlock,
+                                            index = group.imageIndex,
+                                            blocks = blocks,
+                                            context = context,
+                                            haptic = haptic,
+                                            captureSnapshot = { captureSnapshot(it) },
+                                            onDirty = { isDirty = true },
+                                            onDelete = {
+                                                captureSnapshot(force = true)
+                                                blocks.removeAt(group.imageIndex)
+                                            },
+                                            onOpenSettings = { activeImageSettingsIndex = group.imageIndex }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        is EditorRenderGroup.ImageCluster -> {
+                            androidx.compose.foundation.layout.BoxWithConstraints(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                            ) {
+                                val totalWidth = maxWidth
+                                @OptIn(ExperimentalLayoutApi::class)
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    group.items.forEach { (imgIndex, imgBlock) ->
+                                        val itemScale = imgBlock.imageScale.coerceIn(0.20f, 1.0f)
+                                        val computedWidth = if (itemScale >= 0.95f) {
+                                            totalWidth
+                                        } else {
+                                            (totalWidth * itemScale - 8.dp).coerceAtLeast(80.dp)
+                                        }
+                                        Box(
+                                            modifier = Modifier.width(computedWidth)
+                                        ) {
+                                            MovableImageItem(
+                                                block = imgBlock,
+                                                index = imgIndex,
+                                                blocks = blocks,
+                                                context = context,
+                                                haptic = haptic,
+                                                captureSnapshot = { captureSnapshot(it) },
+                                                onDirty = { isDirty = true },
+                                                onDelete = {
+                                                    captureSnapshot(force = true)
+                                                    blocks.removeAt(imgIndex)
+                                                },
+                                                onOpenSettings = { activeImageSettingsIndex = imgIndex }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        is EditorRenderGroup.Single -> {
+                            val index = group.index
+                            val block = group.block
+                            when (block.type) {
+                                BlockType.TEXT -> {
+                                    EditorTextBlockItem(
+                                        block = block,
+                                        index = index,
+                                        blocks = blocks,
+                                        activeFontFamily = activeFontFamily,
+                                        textColor = textColor,
+                                        captureSnapshot = { captureSnapshot(it) },
+                                        onDirty = { isDirty = true },
+                                        chunkLargeTextToBlocks = ::chunkLargeTextToBlocks,
+                                        activeSelectedBlockIndex = activeSelectedBlockIndex,
+                                        activeSelectionRange = activeSelectionRange,
+                                        onSelectionChanged = { selText, idx, range ->
+                                            activeSelectedText = selText
+                                            activeSelectedBlockIndex = idx
+                                            activeSelectionRange = range
+                                        }
+                                    )
+                                }
+
+                                BlockType.CHECKLIST -> {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        IconButton(
+                                            onClick = {
+                                                captureSnapshot()
+                                                blocks[index] = block.copy(checked = !block.checked)
+                                            },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (block.checked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                                contentDescription = "Check",
+                                                tint = if (block.checked) MaterialTheme.colorScheme.primary else Color.Gray
+                                            )
+                                        }
+
+                                        TextField(
+                                            value = block.content,
+                                            onValueChange = {
+                                                blocks[index] = block.copy(content = it)
+                                                captureSnapshot()
+                                            },
+                                            placeholder = { Text("To-do item", color = textColor.copy(alpha = 0.4f)) },
+                                            textStyle = TextStyle(
+                                                fontSize = 15.sp,
+                                                fontFamily = activeFontFamily,
+                                                color = if (block.checked) Color.Gray else textColor,
+                                                textDecoration = if (block.checked) TextDecoration.LineThrough else TextDecoration.None
+                                            ),
+                                            colors = TextFieldDefaults.colors(
+                                                focusedContainerColor = Color.Transparent,
+                                                unfocusedContainerColor = Color.Transparent,
+                                                focusedIndicatorColor = Color.Transparent,
+                                                unfocusedIndicatorColor = Color.Transparent
+                                            ),
+                                            modifier = Modifier.weight(1f)
+                                        )
+
+                                        IconButton(
+                                            onClick = {
+                                                captureSnapshot()
+                                                blocks.removeAt(index)
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(Icons.Default.Close, contentDescription = "Delete item", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                                        }
+                                    }
+                                }
+
+                                BlockType.BULLET -> {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "•",
+                                            fontSize = 20.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isFocusMode) Color.White else MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(start = 8.dp, end = 4.dp)
+                                        )
+
+                                        TextField(
+                                            value = block.content,
+                                            onValueChange = {
+                                                blocks[index] = block.copy(content = it)
+                                                captureSnapshot()
+                                            },
+                                            placeholder = { Text("Bullet item", color = textColor.copy(alpha = 0.4f)) },
+                                            textStyle = TextStyle(
+                                                fontSize = 15.sp,
+                                                fontFamily = activeFontFamily,
+                                                color = textColor
+                                            ),
+                                            colors = TextFieldDefaults.colors(
+                                                focusedContainerColor = Color.Transparent,
+                                                unfocusedContainerColor = Color.Transparent,
+                                                focusedIndicatorColor = Color.Transparent,
+                                                unfocusedIndicatorColor = Color.Transparent
+                                            ),
+                                            modifier = Modifier.weight(1f)
+                                        )
+
+                                        IconButton(
+                                            onClick = {
+                                                captureSnapshot()
+                                                blocks.removeAt(index)
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(Icons.Default.Close, contentDescription = "Delete item", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                                        }
+                                    }
+                                }
+
+                                BlockType.IMAGE -> {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp),
+                                        contentAlignment = when (block.imageAlignment) {
+                                            "left" -> Alignment.CenterStart
+                                            "right" -> Alignment.CenterEnd
+                                            else -> Alignment.Center
+                                        }
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.fillMaxWidth(block.imageScale.coerceIn(0.20f, 1.0f))
+                                        ) {
+                                            MovableImageItem(
+                                                block = block,
+                                                index = index,
+                                                blocks = blocks,
+                                                context = context,
+                                                haptic = haptic,
+                                                captureSnapshot = { captureSnapshot(it) },
+                                                onDirty = { isDirty = true },
+                                                onDelete = {
+                                                    captureSnapshot(force = true)
+                                                    blocks.removeAt(index)
+                                                },
+                                                onOpenSettings = { activeImageSettingsIndex = index }
+                                            )
+                                        }
+                                    }
+                                }
+
+                                BlockType.HANDWRITING -> {
+                                    Box(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                                        HandwritingBlockView(
+                                            strokes = block.strokes,
+                                            onStrokesChanged = { updatedStrokes ->
+                                                blocks[index] = block.copy(strokes = updatedStrokes)
+                                                isDirty = true
+                                            }
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                captureSnapshot()
+                                                blocks.removeAt(index)
+                                            },
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(6.dp)
+                                                .size(28.dp)
+                                        ) {
+                                            Icon(Icons.Default.Close, contentDescription = "Remove canvas", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2461,6 +2605,88 @@ fun NoteEditorScreen(
                         }
                     }
 
+                    // Top-Left Corner Anchor Coordinates
+                    Text(
+                        "Position: Line ${imageTarget.lineOffset}, Column ${imageTarget.charOffset}",
+                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+
+                    // Line navigation (Up / Down)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                captureSnapshot()
+                                val newLine = (imageTarget.lineOffset - 1).coerceAtLeast(0)
+                                blocks[targetIdx] = imageTarget.copy(lineOffset = newLine)
+                            },
+                            enabled = imageTarget.lineOffset > 0,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("▲ Line Up")
+                        }
+
+                        Button(
+                            onClick = {
+                                captureSnapshot()
+                                val newLine = imageTarget.lineOffset + 1
+                                blocks[targetIdx] = imageTarget.copy(lineOffset = newLine)
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Line Down ▼")
+                        }
+                    }
+
+                    // Character column navigation (Left / Right)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                captureSnapshot()
+                                val newOffset = (imageTarget.charOffset - 1).coerceAtLeast(0)
+                                blocks[targetIdx] = imageTarget.copy(charOffset = newOffset)
+                            },
+                            enabled = imageTarget.charOffset > 0,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("◀ Char Left")
+                        }
+
+                        Button(
+                            onClick = {
+                                captureSnapshot()
+                                val newOffset = imageTarget.charOffset + 1
+                                blocks[targetIdx] = imageTarget.copy(charOffset = newOffset)
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Char Right ▶")
+                        }
+
+                        if (imageTarget.charOffset > 0 || imageTarget.lineOffset > 0) {
+                            TextButton(
+                                onClick = {
+                                    captureSnapshot()
+                                    blocks[targetIdx] = imageTarget.copy(charOffset = 0, lineOffset = 0)
+                                }
+                            ) {
+                                Text("Reset (0,0)")
+                            }
+                        }
+                    }
+
                     // Delete & Move options
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -2545,22 +2771,6 @@ fun NoteEditorScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showFontDialog = false }) { Text("Close") }
-            }
-        )
-    }
-
-    // Emoji Insertion Dialog
-    if (showEmojiDialog) {
-        EmojiDialog(
-            onDismissRequest = { showEmojiDialog = false },
-            onEmojiSelected = { emoji ->
-                captureSnapshot()
-                val lastIdx = blocks.indexOfLast { it.type == BlockType.TEXT }
-                if (lastIdx >= 0) {
-                    blocks[lastIdx] = blocks[lastIdx].copy(content = blocks[lastIdx].content + " " + emoji)
-                } else {
-                    blocks.add(NoteBlock(type = BlockType.TEXT, content = emoji))
-                }
             }
         )
     }
@@ -3319,6 +3529,7 @@ fun FormattedNoteView(
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 4.dp),
+        contentPadding = PaddingValues(top = 4.dp, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         // Formatted Mode Active Indicator Banner

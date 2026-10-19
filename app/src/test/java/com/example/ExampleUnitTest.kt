@@ -17,7 +17,7 @@ class ExampleUnitTest {
     val sampleText = "Hello world! This is AI Notes.\n\nSecond paragraph here."
     val stats = TextStats.calculate(sampleText)
 
-    assertEquals(8, stats.words)
+    assertEquals(9, stats.words)
     assertEquals(3, stats.sentences)
     assertEquals(2, stats.paragraphs)
     assertTrue(stats.characters > 0)

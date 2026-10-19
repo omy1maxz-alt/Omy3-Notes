@@ -25,11 +25,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
@@ -48,6 +53,7 @@ import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.Label
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
@@ -100,7 +106,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -108,6 +116,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import com.example.MainViewModel
 import com.example.Screen
@@ -116,6 +125,13 @@ import com.example.data.model.Category
 import com.example.data.model.Note
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.FocusModeBg
+import com.example.ui.theme.NoteTintCream
+import com.example.ui.theme.NoteTintLavender
+import com.example.ui.theme.NoteTintMint
+import com.example.ui.theme.NoteTintRose
+import com.example.ui.theme.NoteTintSky
+import com.example.ui.theme.NoteTintTeal
+import com.example.ui.theme.NoteTintWhite
 import com.example.ui.theme.VipOrangeGradientEnd
 import com.example.ui.theme.VipOrangeGradientStart
 import com.example.ui.theme.getFontFamily
@@ -154,6 +170,7 @@ fun DashboardScreen(
     var showManageCategoriesDialog by remember { mutableStateOf(false) }
     var newCategoryName by remember { mutableStateOf("") }
     var noteToSplit by remember { mutableStateOf<Note?>(null) }
+    var noteToDelete by remember { mutableStateOf<Note?>(null) }
 
     val todayDayNumber = remember { Calendar.getInstance().get(Calendar.DAY_OF_MONTH).toString() }
 
@@ -549,8 +566,20 @@ fun DashboardScreen(
                                 onSplitClick = {
                                     noteToSplit = note
                                 },
-                                onMove = { delta ->
-                                    viewModel.moveNotePosition(note.id, delta)
+                                onTogglePin = {
+                                    viewModel.togglePinNote(note)
+                                },
+                                onDuplicate = {
+                                    viewModel.duplicateNote(note)
+                                },
+                                onDelete = {
+                                    noteToDelete = note
+                                },
+                                onSelectTint = { tint ->
+                                    viewModel.updateNoteTint(note, tint)
+                                },
+                                onMoveDirection = { deltaX, deltaY ->
+                                    viewModel.moveNoteDirection(note.id, deltaX, deltaY, isGridView = true)
                                 }
                             )
                         }
@@ -580,8 +609,20 @@ fun DashboardScreen(
                                 onSplitClick = {
                                     noteToSplit = note
                                 },
-                                onMove = { delta ->
-                                    viewModel.moveNotePosition(note.id, delta)
+                                onTogglePin = {
+                                    viewModel.togglePinNote(note)
+                                },
+                                onDuplicate = {
+                                    viewModel.duplicateNote(note)
+                                },
+                                onDelete = {
+                                    noteToDelete = note
+                                },
+                                onSelectTint = { tint ->
+                                    viewModel.updateNoteTint(note, tint)
+                                },
+                                onMoveDirection = { deltaX, deltaY ->
+                                    viewModel.moveNoteDirection(note.id, deltaX, deltaY, isGridView = true)
                                 }
                             )
                         }
@@ -609,15 +650,21 @@ fun DashboardScreen(
                             },
                             onLongClick = { viewModel.toggleNoteSelection(note.id) },
                             onDuplicate = { viewModel.duplicateNote(note) },
-                            onDelete = { viewModel.deleteNote(note.id) },
+                            onDelete = { noteToDelete = note },
                             onExportPdf = {
                                 viewModel.showMessage("Use Editor to choose PDF destination")
                             },
                             onSplitClick = {
                                 noteToSplit = note
                             },
-                            onMove = { delta ->
-                                viewModel.moveNotePosition(note.id, delta)
+                            onTogglePin = {
+                                viewModel.togglePinNote(note)
+                            },
+                            onSelectTint = { tint ->
+                                viewModel.updateNoteTint(note, tint)
+                            },
+                            onMoveDirection = { deltaX, deltaY ->
+                                viewModel.moveNoteDirection(note.id, deltaX, deltaY, isGridView = false)
                             }
                         )
                     }
@@ -885,6 +932,89 @@ fun DashboardScreen(
             }
         )
     }
+
+    // Delete Note Confirmation Dialog
+    noteToDelete?.let { note ->
+        AlertDialog(
+            onDismissRequest = { noteToDelete = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = null,
+                        tint = Color.Red
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Delete Note")
+                }
+            },
+            text = {
+                Text("Are you sure you want to delete \"${note.title.ifBlank { "Untitled Note" }}\"? This action cannot be undone.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.deleteNote(note.id)
+                        noteToDelete = null
+                    },
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = Color.Red)
+                ) {
+                    Text("Delete", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { noteToDelete = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun NoteColorDropdown(
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
+    onSelectTint: (String) -> Unit
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismissRequest
+    ) {
+        val tints = listOf(
+            "cream" to NoteTintCream,
+            "mint" to NoteTintMint,
+            "rose" to NoteTintRose,
+            "lavender" to NoteTintLavender,
+            "sky" to NoteTintSky,
+            "teal" to NoteTintTeal,
+            "white" to NoteTintWhite
+        )
+        Text(
+            text = "Select Note Color",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+        )
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            tints.forEach { (name, color) ->
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(color)
+                        .border(1.dp, Color.Gray.copy(alpha = 0.5f), CircleShape)
+                        .clickable {
+                            onSelectTint(name)
+                        }
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -918,14 +1048,21 @@ fun NoteCard(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onSplitClick: () -> Unit,
-    onMove: (delta: Int) -> Unit
+    onTogglePin: () -> Unit,
+    onDuplicate: () -> Unit,
+    onDelete: () -> Unit,
+    onSelectTint: (String) -> Unit,
+    onMoveDirection: (deltaX: Int, deltaY: Int) -> Unit
 ) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val tintColor = getNoteColor(note.tint)
     val fontFamily = getFontFamily(note.font)
 
     var isDragging by remember { mutableStateOf(false) }
+    var accumulatedDragX by remember { mutableFloatStateOf(0f) }
     var accumulatedDragY by remember { mutableFloatStateOf(0f) }
+    var showColorPicker by remember { mutableStateOf(false) }
 
     val imageBlock = note.blocks.firstOrNull { it.type == BlockType.IMAGE && !it.imagePath.isNullOrBlank() }
     val loadedBitmap by remember(imageBlock?.imagePath) {
@@ -952,10 +1089,11 @@ fun NoteCard(
     Card(
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = tintColor),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (isDragging) 10.dp else 2.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isDragging) 12.dp else 2.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .offset { IntOffset(0, accumulatedDragY.roundToInt()) }
+            .zIndex(if (isDragging) 10f else 1f)
+            .offset { IntOffset(accumulatedDragX.roundToInt(), accumulatedDragY.roundToInt()) }
             .scale(if (isDragging) 1.04f else 1f)
             .clip(RoundedCornerShape(16.dp))
             .border(
@@ -964,8 +1102,8 @@ fun NoteCard(
                 shape = RoundedCornerShape(16.dp)
             )
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            // Header: Pinned indicator & Drag Handle + Quick Move controls
+        Column(modifier = Modifier.padding(10.dp)) {
+            // Header: Pin Toggle Button & 4-Way Directional Move Controls + Drag Handle
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -973,82 +1111,149 @@ fun NoteCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (note.isPinned) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.PushPin,
-                            contentDescription = "Pinned",
-                            tint = Color.DarkGray,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Pinned", fontSize = 11.sp, color = Color.DarkGray, fontWeight = FontWeight.SemiBold)
-                    }
-                } else {
-                    Spacer(modifier = Modifier.width(1.dp))
+                // Pin / Unpin button
+                IconButton(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onTogglePin()
+                    },
+                    modifier = Modifier.size(26.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PushPin,
+                        contentDescription = if (note.isPinned) "Unpin note" else "Pin note to top",
+                        tint = if (note.isPinned) Color(0xFFFF9800) else Color.DarkGray.copy(alpha = 0.5f),
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
 
-                // Drag on hold & Quick move buttons to adjust position
+                // Directional Reorder Controls (◀, ▲, ▼, ▶) + 2D Drag Handle
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    horizontalArrangement = Arrangement.spacedBy(1.dp)
                 ) {
+                    // Move Left ◀
                     IconButton(
-                        onClick = { onMove(-1) },
-                        modifier = Modifier.size(26.dp)
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onMoveDirection(-1, 0)
+                        },
+                        modifier = Modifier.size(22.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Move note left",
+                            tint = Color.DarkGray.copy(alpha = 0.85f),
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+
+                    // Move Up ▲
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onMoveDirection(0, -1)
+                        },
+                        modifier = Modifier.size(22.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.ArrowUpward,
                             contentDescription = "Move note up",
-                            tint = Color.DarkGray.copy(alpha = 0.8f),
-                            modifier = Modifier.size(15.dp)
+                            tint = Color.DarkGray.copy(alpha = 0.85f),
+                            modifier = Modifier.size(13.dp)
                         )
                     }
+
+                    // Move Down ▼
                     IconButton(
-                        onClick = { onMove(1) },
-                        modifier = Modifier.size(26.dp)
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onMoveDirection(0, 1)
+                        },
+                        modifier = Modifier.size(22.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.ArrowDownward,
                             contentDescription = "Move note down",
-                            tint = Color.DarkGray.copy(alpha = 0.8f),
-                            modifier = Modifier.size(15.dp)
+                            tint = Color.DarkGray.copy(alpha = 0.85f),
+                            modifier = Modifier.size(13.dp)
                         )
                     }
-                    // Drag handle zone: Hold to drag and adjust position
+
+                    // Move Right ▶
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onMoveDirection(1, 0)
+                        },
+                        modifier = Modifier.size(22.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = "Move note right",
+                            tint = Color.DarkGray.copy(alpha = 0.85f),
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+
+                    // Drag handle zone: Hold to drag in any direction (Left, Right, Up, Down)
                     Surface(
                         shape = RoundedCornerShape(6.dp),
-                        color = if (isDragging) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Black.copy(alpha = 0.08f),
+                        color = if (isDragging) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else Color.Black.copy(alpha = 0.08f),
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .pointerInput(note.id) {
                                 detectDragGesturesAfterLongPress(
                                     onDragStart = {
                                         isDragging = true
+                                        accumulatedDragX = 0f
                                         accumulatedDragY = 0f
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     },
                                     onDrag = { change, dragAmount ->
                                         change.consume()
+                                        accumulatedDragX += dragAmount.x
                                         accumulatedDragY += dragAmount.y
-                                        if (accumulatedDragY > 50f) {
-                                            onMove(1)
-                                            accumulatedDragY = 0f
-                                        } else if (accumulatedDragY < -50f) {
-                                            onMove(-1)
-                                            accumulatedDragY = 0f
+                                        val threshold = 50f
+                                        if (kotlin.math.abs(accumulatedDragX) > threshold && kotlin.math.abs(accumulatedDragX) > kotlin.math.abs(accumulatedDragY)) {
+                                            if (accumulatedDragX > threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                onMoveDirection(1, 0)
+                                                accumulatedDragX = 0f
+                                                accumulatedDragY = 0f
+                                            } else if (accumulatedDragX < -threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                onMoveDirection(-1, 0)
+                                                accumulatedDragX = 0f
+                                                accumulatedDragY = 0f
+                                            }
+                                        } else if (kotlin.math.abs(accumulatedDragY) > threshold) {
+                                            if (accumulatedDragY > threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                onMoveDirection(0, 1)
+                                                accumulatedDragX = 0f
+                                                accumulatedDragY = 0f
+                                            } else if (accumulatedDragY < -threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                onMoveDirection(0, -1)
+                                                accumulatedDragX = 0f
+                                                accumulatedDragY = 0f
+                                            }
                                         }
                                     },
                                     onDragEnd = {
                                         isDragging = false
+                                        accumulatedDragX = 0f
                                         accumulatedDragY = 0f
                                     },
                                     onDragCancel = {
                                         isDragging = false
+                                        accumulatedDragX = 0f
                                         accumulatedDragY = 0f
                                     }
                                 )
                             }
-                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -1056,13 +1261,13 @@ fun NoteCard(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.DragHandle,
-                                contentDescription = "Hold to drag and reorder",
+                                contentDescription = "Hold to drag and move left right up down",
                                 tint = if (isDragging) MaterialTheme.colorScheme.primary else Color.DarkGray,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(14.dp)
                             )
                             Text(
-                                text = if (isDragging) "Moving" else "Hold drag",
-                                fontSize = 10.sp,
+                                text = if (isDragging) "Move" else "Drag",
+                                fontSize = 9.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = if (isDragging) MaterialTheme.colorScheme.primary else Color.DarkGray
                             )
@@ -1090,9 +1295,9 @@ fun NoteCard(
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(110.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .padding(bottom = 8.dp)
+                            .height(100.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .padding(bottom = 6.dp)
                     )
                 }
 
@@ -1101,31 +1306,31 @@ fun NoteCard(
                     Text(
                         text = note.title,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
+                        fontSize = 15.sp,
                         fontFamily = fontFamily,
                         color = Color.Black,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(3.dp))
                 }
 
-                // 3-6 lines preview
+                // Preview text
                 if (previewText.isNotBlank()) {
                     Text(
                         text = previewText,
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontFamily = fontFamily,
                         color = Color.DarkGray,
-                        maxLines = 5,
+                        maxLines = 4,
                         overflow = TextOverflow.Ellipsis,
-                        lineHeight = 18.sp
+                        lineHeight = 16.sp
                     )
                 }
 
                 // Tags chips
                 if (note.tags.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         modifier = Modifier.fillMaxWidth()
@@ -1137,10 +1342,10 @@ fun NoteCard(
                             ) {
                                 Text(
                                     text = "#$tag",
-                                    fontSize = 10.sp,
+                                    fontSize = 9.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = Color.DarkGray,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                                 )
                             }
                         }
@@ -1148,52 +1353,103 @@ fun NoteCard(
                 }
             }
 
-            // Bottom action row: Date/Time caption + Dedicated Box Button to Split Note
-            Row(
+            // Bottom Section: Date caption & Essential Action Buttons Row
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(top = 6.dp)
             ) {
                 if (showUpdatedDate) {
                     Text(
                         text = DateFormats.formatNoteTimestamp(note.updatedAt, dateFormat),
-                        fontSize = 11.sp,
+                        fontSize = 10.sp,
                         color = Color.Gray,
-                        modifier = Modifier.weight(1f, fill = false)
+                        modifier = Modifier.padding(bottom = 4.dp)
                     )
-                } else {
-                    Spacer(modifier = Modifier.weight(1f))
                 }
 
-                // Dedicated Box button to split note by char count (DOES NOT OPEN NOTE)
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color(0xFF1E5B5B), // High-contrast dark teal box button
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
-                    shadowElevation = 2.dp,
-                    modifier = Modifier
-                        .testTag("split_char_box_btn_${note.id}")
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onSplitClick() }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                    // Color Palette Button
+                    Box {
+                        IconButton(
+                            onClick = { showColorPicker = true },
+                            modifier = Modifier.size(26.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Palette,
+                                contentDescription = "Change note color",
+                                tint = Color.DarkGray.copy(alpha = 0.8f),
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+                        NoteColorDropdown(
+                            expanded = showColorPicker,
+                            onDismissRequest = { showColorPicker = false },
+                            onSelectTint = { tint ->
+                                onSelectTint(tint)
+                                showColorPicker = false
+                            }
+                        )
+                    }
+
+                    // Dedicated Box button to split note by char count
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = Color(0xFF1E5B5B),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
+                        shadowElevation = 1.dp,
+                        modifier = Modifier
+                            .testTag("split_char_box_btn_${note.id}")
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { onSplitClick() }
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CallSplit,
+                                contentDescription = "Split text based on characters",
+                                tint = Color.White,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = "Split",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+
+                    // Duplicate Button
+                    IconButton(
+                        onClick = onDuplicate,
+                        modifier = Modifier.size(26.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.CallSplit,
-                            contentDescription = "Split text based on characters",
-                            tint = Color.White,
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Duplicate note",
+                            tint = Color.DarkGray.copy(alpha = 0.8f),
                             modifier = Modifier.size(14.dp)
                         )
-                        Text(
-                            text = "Split [char]",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
+                    }
+
+                    // Delete Button
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.size(26.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Delete note",
+                            tint = Color(0xFFD32F2F),
+                            modifier = Modifier.size(15.dp)
                         )
                     }
                 }
@@ -1215,11 +1471,16 @@ fun NoteListRow(
     onDelete: () -> Unit,
     onExportPdf: () -> Unit,
     onSplitClick: () -> Unit,
-    onMove: (delta: Int) -> Unit
+    onTogglePin: () -> Unit,
+    onSelectTint: (String) -> Unit,
+    onMoveDirection: (deltaX: Int, deltaY: Int) -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
     val tintColor = getNoteColor(note.tint)
     var isDragging by remember { mutableStateOf(false) }
+    var accumulatedDragX by remember { mutableFloatStateOf(0f) }
     var accumulatedDragY by remember { mutableFloatStateOf(0f) }
+    var showColorPicker by remember { mutableStateOf(false) }
 
     val previewText = remember(note.blocks) {
         val sb = StringBuilder()
@@ -1272,10 +1533,11 @@ fun NoteListRow(
     Card(
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = tintColor),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (isDragging) 10.dp else 2.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isDragging) 12.dp else 2.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .offset { IntOffset(0, accumulatedDragY.roundToInt()) }
+            .zIndex(if (isDragging) 10f else 1f)
+            .offset { IntOffset(accumulatedDragX.roundToInt(), accumulatedDragY.roundToInt()) }
             .scale(if (isDragging) 1.03f else 1f)
             .clip(RoundedCornerShape(14.dp))
             .border(
@@ -1293,59 +1555,123 @@ fun NoteListRow(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (note.isPinned) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.PushPin,
-                            contentDescription = "Pinned",
-                            tint = Color.DarkGray,
-                            modifier = Modifier.size(16.dp).padding(end = 4.dp)
-                        )
-                        Text("Pinned", fontSize = 11.sp, color = Color.DarkGray, fontWeight = FontWeight.SemiBold)
-                    }
-                } else {
-                    Spacer(modifier = Modifier.width(1.dp))
+                // Pin / Unpin Button
+                IconButton(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onTogglePin()
+                    },
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PushPin,
+                        contentDescription = if (note.isPinned) "Unpin note" else "Pin note to top",
+                        tint = if (note.isPinned) Color(0xFFFF9800) else Color.DarkGray.copy(alpha = 0.5f),
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    IconButton(onClick = { onMove(-1) }, modifier = Modifier.size(26.dp)) {
-                        Icon(Icons.Default.ArrowUpward, contentDescription = "Move up", tint = Color.DarkGray, modifier = Modifier.size(15.dp))
+                    // Move Left ◀
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onMoveDirection(-1, 0)
+                        },
+                        modifier = Modifier.size(26.dp)
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Move note left", tint = Color.DarkGray, modifier = Modifier.size(15.dp))
                     }
-                    IconButton(onClick = { onMove(1) }, modifier = Modifier.size(26.dp)) {
-                        Icon(Icons.Default.ArrowDownward, contentDescription = "Move down", tint = Color.DarkGray, modifier = Modifier.size(15.dp))
+
+                    // Move Up ▲
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onMoveDirection(0, -1)
+                        },
+                        modifier = Modifier.size(26.dp)
+                    ) {
+                        Icon(Icons.Default.ArrowUpward, contentDescription = "Move note up", tint = Color.DarkGray, modifier = Modifier.size(15.dp))
                     }
-                    // Drag handle zone
+
+                    // Move Down ▼
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onMoveDirection(0, 1)
+                        },
+                        modifier = Modifier.size(26.dp)
+                    ) {
+                        Icon(Icons.Default.ArrowDownward, contentDescription = "Move note down", tint = Color.DarkGray, modifier = Modifier.size(15.dp))
+                    }
+
+                    // Move Right ▶
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onMoveDirection(1, 0)
+                        },
+                        modifier = Modifier.size(26.dp)
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Move note right", tint = Color.DarkGray, modifier = Modifier.size(15.dp))
+                    }
+
+                    // 2D Drag handle zone
                     Surface(
                         shape = RoundedCornerShape(6.dp),
-                        color = if (isDragging) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Black.copy(alpha = 0.08f),
+                        color = if (isDragging) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else Color.Black.copy(alpha = 0.08f),
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .pointerInput(note.id) {
                                 detectDragGesturesAfterLongPress(
                                     onDragStart = {
                                         isDragging = true
+                                        accumulatedDragX = 0f
                                         accumulatedDragY = 0f
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     },
                                     onDrag = { change, dragAmount ->
                                         change.consume()
+                                        accumulatedDragX += dragAmount.x
                                         accumulatedDragY += dragAmount.y
-                                        if (accumulatedDragY > 50f) {
-                                            onMove(1)
-                                            accumulatedDragY = 0f
-                                        } else if (accumulatedDragY < -50f) {
-                                            onMove(-1)
-                                            accumulatedDragY = 0f
+                                        val threshold = 50f
+                                        if (kotlin.math.abs(accumulatedDragX) > threshold && kotlin.math.abs(accumulatedDragX) > kotlin.math.abs(accumulatedDragY)) {
+                                            if (accumulatedDragX > threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                onMoveDirection(1, 0)
+                                                accumulatedDragX = 0f
+                                                accumulatedDragY = 0f
+                                            } else if (accumulatedDragX < -threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                onMoveDirection(-1, 0)
+                                                accumulatedDragX = 0f
+                                                accumulatedDragY = 0f
+                                            }
+                                        } else if (kotlin.math.abs(accumulatedDragY) > threshold) {
+                                            if (accumulatedDragY > threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                onMoveDirection(0, 1)
+                                                accumulatedDragX = 0f
+                                                accumulatedDragY = 0f
+                                            } else if (accumulatedDragY < -threshold) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                onMoveDirection(0, -1)
+                                                accumulatedDragX = 0f
+                                                accumulatedDragY = 0f
+                                            }
                                         }
                                     },
                                     onDragEnd = {
                                         isDragging = false
+                                        accumulatedDragX = 0f
                                         accumulatedDragY = 0f
                                     },
                                     onDragCancel = {
                                         isDragging = false
+                                        accumulatedDragX = 0f
                                         accumulatedDragY = 0f
                                     }
                                 )
@@ -1443,6 +1769,21 @@ fun NoteListRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Color Palette Button
+                    Box {
+                        IconButton(onClick = { showColorPicker = true }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Palette, contentDescription = "Change color", tint = Color.DarkGray, modifier = Modifier.size(16.dp))
+                        }
+                        NoteColorDropdown(
+                            expanded = showColorPicker,
+                            onDismissRequest = { showColorPicker = false },
+                            onSelectTint = { tint ->
+                                onSelectTint(tint)
+                                showColorPicker = false
+                            }
+                        )
+                    }
+
                     // Dedicated Box button to split text based on char count (DOES NOT OPEN NOTE)
                     Surface(
                         shape = RoundedCornerShape(8.dp),
